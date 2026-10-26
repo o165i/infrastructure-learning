@@ -1,0 +1,97 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: ferrum
+  namespace: ferrum
+  labels:
+    app.kubernetes.io/name: ferrum
+spec:
+  replicas: 2
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: ferrum
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: ferrum
+    spec:
+      affinity:
+        nodeAffinity:
+          requiredDuringSchedulingIgnoredDuringExecution:
+            nodeSelectorTerms:
+              - matchExpressions:
+                - key: node-role.kubernetes.io/control-plane
+                  operator: DoesNotExist
+      containers:
+        - name: ferrum
+          image: ferrum-app:v1
+          # образ загружен на ноды вручную, из реестра не скачиваем
+          imagePullPolicy: IfNotPresent
+          # Запускаем сервер напрямую, минуя docker-entrypoint.sh:
+          # миграции делает отдельный Job, а не каждая реплика при старте.
+          command: ["npx", "next", "start"]
+          ports:
+            - containerPort: 3000
+              name: http
+          env:
+            - name: NODE_ENV
+              value: production
+            - name: NEXTAUTH_URL
+              value: http://ferrum.lab   # поменяй, если будешь использовать другое имя
+            - name: DATABASE_URL
+              valueFrom:
+                secretKeyRef:
+                  name: ferrum-secrets
+                  key: DATABASE_URL
+            - name: NEXTAUTH_SECRET
+              valueFrom:
+                secretKeyRef:
+                  name: ferrum-secrets
+                  key: NEXTAUTH_SECRET
+          # startup: даём приложению время подняться
+          startupProbe:
+            tcpSocket:
+              port: http
+            periodSeconds: 3
+            failureThreshold: 40
+          # readiness: готов принимать трафик только если отвечает и база доступна
+          readinessProbe:
+            httpGet:
+              path: /api/health
+              port: http
+            periodSeconds: 10
+            timeoutSeconds: 3
+            failureThreshold: 3
+          # liveness: проверяем только сам процесс, БЕЗ базы.
+          # Иначе при падении базы Kubernetes начнёт перезапускать все поды приложения.
+          livenessProbe:
+            tcpSocket:
+              port: http
+            periodSeconds: 20
+            failureThreshold: 3
+          resources:
+            requests:
+              cpu: 100m
+              memory: 256Mi
+            limits:
+              cpu: 500m
+              memory: 768Mi
+          securityContext:
+            allowPrivilegeEscalation: false
+            capabilities:
+              drop: ["ALL"]
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: ferrum
+  namespace: ferrum
+  labels:
+    app.kubernetes.io/name: ferrum
+spec:
+  selector:
+    app.kubernetes.io/name: ferrum
+  ports:
+    - name: http
+      port: 80
+      targetPort: http

@@ -1,0 +1,44 @@
+# Разовая задача: применить миграции Prisma ДО запуска приложения.
+# Job нельзя "обновить" через apply: перед повторным запуском сначала
+#   kubectl -n ferrum delete job ferrum-migrate
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: ferrum-migrate
+  namespace: ferrum
+  labels:
+    app.kubernetes.io/name: ferrum-migrate
+spec:
+  backoffLimit: 4
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: ferrum-migrate
+    spec:
+      restartPolicy: OnFailure
+      initContainers:
+        # ждём, пока база начнёт принимать подключения
+        - name: wait-for-db
+          image: postgres:16-alpine
+          command:
+            - sh
+            - -c
+            - until pg_isready -h postgres -p 5432 -U ferrum; do echo "waiting for db"; sleep 2; done
+      containers:
+        - name: migrate
+          image: ferrum-app:v1
+          imagePullPolicy: IfNotPresent
+          # command заменяет ENTRYPOINT образа (docker-entrypoint.sh)
+          command: ["npx", "prisma", "migrate", "deploy"]
+          env:
+            - name: DATABASE_URL
+              valueFrom:
+                secretKeyRef:
+                  name: ferrum-secrets
+                  key: DATABASE_URL
+          resources:
+            requests:
+              cpu: 100m
+              memory: 256Mi
+            limits:
+              memory: 512Mi

@@ -1,0 +1,2 @@
+# Обычный (НЕ зашифрованный) файл: просто ссылается на переменную из vault.yml.
+ansible_become_password: "{{ vault_become_password }}"

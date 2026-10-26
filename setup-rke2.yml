@@ -1,0 +1,32 @@
+---
+- hosts: c1
+  become: true
+  tasks:
+    - name: Install RKE2 server
+      shell: curl -sfL https://get.rke2.io | sh -
+      args:
+        creates: /usr/local/bin/rke2
+
+    - name: Enable and start RKE2 server
+      service:
+        name: rke2-server
+        state: started
+        enabled: yes
+
+    - name: Wait for kubeconfig
+      wait_for:
+        path: /etc/rancher/rke2/rke2.yaml
+        timeout: 120
+
+- hosts: wm1,wm2
+  become: true
+  tasks:
+    - name: Install RKE2 agent
+      shell: curl -sfL https://get.rke2.io | INSTALL_RKE2_TYPE="agent" sh -
+      args:
+        creates: /usr/local/bin/rke2
+
+    - name: Enable RKE2 agent
+      service:
+        name: rke2-agent
+        enabled: yes

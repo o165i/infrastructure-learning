@@ -1,0 +1,92 @@
+---
+# DNS-сервер лаборатории (bind9), зона lab.local.
+# При изменении записей ВСЕГДА увеличивай Serial в зоне (сейчас 3),
+# иначе bind может не заметить изменений.
+- hosts: dns
+  become: true
+  tasks:
+    - name: Update apt cache
+      apt:
+        update_cache: yes
+
+    - name: Install bind9
+      apt:
+        name:
+          - bind9
+          - bind9utils
+          - bind9-doc
+        state: present
+
+    - name: Configure named.conf.options
+      copy:
+        dest: /etc/bind/named.conf.options
+        content: |
+          options {
+            directory "/var/cache/bind";
+            recursion yes;
+            # рекурсия только для лаборатории, а не для всех
+            allow-recursion { 192.168.56.0/24; 127.0.0.1; };
+            listen-on { any; };
+            listen-on-v6 { none; };
+            forwarders {
+              8.8.8.8;
+              8.8.4.4;
+            };
+          };
+      notify: Reload bind9
+
+    - name: Configure named.conf.local
+      copy:
+        dest: /etc/bind/named.conf.local
+        content: |
+          zone "lab.local" {
+            type master;
+            file "/etc/bind/zones/db.lab.local";
+          };
+      notify: Reload bind9
+
+    - name: Create zones directory
+      file:
+        path: /etc/bind/zones
+        state: directory
+
+    - name: Create zone file
+      copy:
+        dest: /etc/bind/zones/db.lab.local
+        content: |
+          $TTL 604800
+          @ IN SOA dns.lab.local. admin.lab.local. (
+            3 ; Serial
+            604800 ; Refresh
+            86400 ; Retry
+            2419200 ; Expire
+            604800 ) ; Negative Cache TTL
+          ;
+          @ IN NS dns.lab.local.
+          dns IN A 192.168.56.104
+          nfs1 IN A 192.168.56.107
+          c1 IN A 192.168.56.105
+          wm1 IN A 192.168.56.103
+          wm2 IN A 192.168.56.106
+          wm3 IN A 192.168.56.109
+          ; Вход на сайт: Traefik слушает 80/443 на каждой ноде кластера.
+          ; Адрес wm3 добавь сюда ПОСЛЕ того, как она вступит в кластер.
+          ferrum IN A 192.168.56.103
+          ferrum IN A 192.168.56.106
+      notify: Reload bind9
+
+    - name: Check the configuration and the zone before reloading
+      shell: named-checkconf && named-checkzone lab.local /etc/bind/zones/db.lab.local
+      changed_when: false
+
+    - name: Start and enable bind9
+      service:
+        name: bind9
+        state: started
+        enabled: yes
+
+  handlers:
+    - name: Reload bind9
+      service:
+        name: bind9
+        state: reloaded

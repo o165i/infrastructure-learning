@@ -1,0 +1,167 @@
+---
+# Базовая защита ДЛЯ ВСЕХ ВМ: SSH только по ключам, ufw, fail2ban.
+# Для нод Kubernetes (группа k8s) дополнительно открываются сети подов и сервисов.
+#
+# Запуск по одной машине (рекомендую, особенно для кластера):
+#   ansible-playbook harden.yml --limit nfs1
+#   ansible-playbook harden.yml --limit dns
+#   ansible-playbook harden.yml --limit wm3
+#   ...
+# Теги: ssh, firewall, fail2ban
+- hosts: all
+  become: true
+  serial: 1                # по одной машине; при первой ошибке остальные не трогаем
+  max_fail_percentage: 0
+  vars:
+    lab_subnet: "192.168.56.0/24"      # сеть ВМ (host-only)
+    pod_cidr: "10.42.0.0/16"           # сеть подов RKE2
+    service_cidr: "10.43.0.0/16"       # сеть сервисов RKE2
+    ssh_public_key_file: "~/.ssh/id_ed25519.pub"   # публичный ключ на ноутбуке (WSL)
+    is_k8s_node: "{{ 'k8s' in group_names }}"
+    ufw_allow_sources: "{{ [lab_subnet] + ([pod_cidr, service_cidr] if is_k8s_node | bool else []) }}"
+
+  pre_tasks:
+    - name: Refuse to run without --limit (so that nothing hits every VM by accident)
+      assert:
+        that: ansible_limit is defined
+        fail_msg: "Запускай с --limit ИМЯ_ВМ, например: --limit wm1"
+      run_once: true
+      tags: [always]
+
+  tasks:
+    # ------------------------------------------------------------------ SSH
+    - name: Install the controller's public key for the SSH user
+      ansible.posix.authorized_key:
+        user: "{{ ansible_user }}"
+        key: "{{ lookup('file', ssh_public_key_file) }}"
+        state: present
+      tags: [ssh]
+
+    - name: Make sure at least one authorized key exists (do not lock ourselves out)
+      shell: "test -s ~{{ ansible_user }}/.ssh/authorized_keys"
+      changed_when: false
+      tags: [ssh]
+
+    - name: Harden sshd (keys only)
+      block:
+        - name: fixing sshd_config trouble (includes)
+          lineinfile:
+            path: /etc/ssh/sshd_config
+            line: 'Include /etc/ssh/sshd_config.d/*.conf'
+            insertbefore: BOF
+            state: present
+            
+        - name: Write sshd drop-in
+          copy:
+            dest: /etc/ssh/sshd_config.d/00-hardening.conf
+            mode: '0644'
+            content: |
+              # Управляется Ansible. Первый заданный параметр побеждает, поэтому имя 00-.
+              PasswordAuthentication no
+              KbdInteractiveAuthentication no
+              PubkeyAuthentication yes
+              PermitRootLogin no
+              MaxAuthTries 3
+
+        - name: Validate sshd configuration
+          command: /usr/sbin/sshd -t
+          changed_when: false
+
+        - name: Reload sshd
+          service:
+            name: ssh
+            state: reloaded
+
+        - name: Check the effective setting (drop-in really applied)
+          command: /usr/sbin/sshd -T
+          register: sshd_effective
+          changed_when: false
+          failed_when: "'passwordauthentication no' not in sshd_effective.stdout"
+      rescue:
+        - name: Roll back the sshd drop-in
+          file:
+            path: /etc/ssh/sshd_config.d/00-hardening.conf
+            state: absent
+
+        - name: Stop here
+          fail:
+            msg: "sshd не принял конфигурацию или drop-in не применился, drop-in удалён."
+      tags: [ssh]
+
+    # ------------------------------------------------------------- firewall
+    - name: Install ufw
+      apt:
+        name: ufw
+        state: present
+        update_cache: true
+      tags: [firewall]
+
+    - name: Allow forwarded traffic (required for pod networking on Kubernetes nodes)
+      lineinfile:
+        path: /etc/default/ufw
+        regexp: '^DEFAULT_FORWARD_POLICY='
+        line: 'DEFAULT_FORWARD_POLICY="ACCEPT"'
+      when: is_k8s_node | bool
+      tags: [firewall]
+
+    - name: Allow everything from the lab subnet (and cluster networks on k8s nodes)
+      community.general.ufw:
+        rule: allow
+        src: "{{ item }}"
+        comment: "lab and cluster networks"
+      loop: "{{ ufw_allow_sources }}"
+      tags: [firewall]
+
+    - name: Default policy, deny incoming
+      community.general.ufw:
+        default: deny
+        direction: incoming
+      tags: [firewall]
+
+    - name: Default policy, allow outgoing
+      community.general.ufw:
+        default: allow
+        direction: outgoing
+      tags: [firewall]
+
+    - name: Enable ufw
+      community.general.ufw:
+        state: enabled
+      tags: [firewall]
+
+    # ------------------------------------------------------------ fail2ban
+    - name: Install fail2ban
+      apt:
+        name:
+          - fail2ban
+          - python3-systemd
+        state: present
+      tags: [fail2ban]
+
+    - name: Configure the sshd jail
+      copy:
+        dest: /etc/fail2ban/jail.d/sshd-local.conf
+        mode: '0644'
+        content: |
+          [sshd]
+          enabled = true
+          backend = systemd
+          maxretry = 5
+          findtime = 10m
+          bantime = 1h
+          ignoreip = 127.0.0.1/8 ::1 {{ lab_subnet }}
+      notify: Restart fail2ban
+      tags: [fail2ban]
+
+    - name: Enable and start fail2ban
+      service:
+        name: fail2ban
+        state: started
+        enabled: true
+      tags: [fail2ban]
+
+  handlers:
+    - name: Restart fail2ban
+      service:
+        name: fail2ban
+        state: restarted

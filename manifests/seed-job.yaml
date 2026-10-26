@@ -1,0 +1,24 @@
+# Тестовые данные (админ, пользователь, товары). Запускается вручную и разово:
+#   kubectl apply -f k8s/seed-job.yaml
+# Только для тестовых стендов: внутри пароли вида Admin123!
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: ferrum-seed
+  namespace: ferrum
+spec:
+  backoffLimit: 2
+  template:
+    spec:
+      restartPolicy: Never
+      containers:
+        - name: seed
+          image: ferrum-app:v1
+          imagePullPolicy: IfNotPresent
+          command: ["npx", "tsx", "prisma/seed.ts"]
+          env:
+            - name: DATABASE_URL
+              valueFrom:
+                secretKeyRef:
+                  name: ferrum-secrets
+                  key: DATABASE_URL

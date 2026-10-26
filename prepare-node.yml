@@ -1,0 +1,68 @@
+---
+# Подготовка НОВОЙ ноды: убрать графическую оболочку.
+# SSH, ufw и fail2ban для всех ВМ вынесены в harden.yml.
+#
+# Запуск:   ansible-playbook prepare-node.yml
+- hosts: new_workers
+  become: true
+  vars:
+    lan_interface: enp0s8                # host-only (адрес лаборатории)
+    nat_interface: enp0s3                # NAT (интернет)
+    desktop_packages:
+      - task-desktop
+      - task-gnome-desktop
+      - task-xfce-desktop
+      - task-kde-desktop
+      - task-cinnamon-desktop
+      - task-mate-desktop
+      - task-lxde-desktop
+      - task-lxqt-desktop
+      - gdm3
+      - lightdm
+      - sddm
+      - lxdm
+
+  tasks:
+    # ------------------------------------------------------------------ GUI
+    - name: Get current default boot target
+      command: systemctl get-default
+      register: default_target
+      changed_when: false
+      tags: [gui]
+
+    - name: Boot to text mode (multi-user.target)
+      command: systemctl set-default multi-user.target
+      when: default_target.stdout != "multi-user.target"
+      register: target_changed
+      tags: [gui]
+
+    - name: Network must not depend on the desktop (NetworkManager) - ifupdown must define both NICs
+      shell: |
+        grep -qE '^(auto|allow-hotplug)[[:space:]]+{{ lan_interface }}' /etc/network/interfaces &&
+        grep -qE '^(auto|allow-hotplug)[[:space:]]+{{ nat_interface }}' /etc/network/interfaces
+      changed_when: false
+      tags: [gui]
+
+    - name: Mark essential packages as manually installed (autoremove must keep them)
+      shell: |
+        for p in sudo openssh-server openssh-sftp-server python3 python3-apt \
+                 ifupdown isc-dhcp-client dhcpcd-base iproute2 curl ca-certificates; do
+          if dpkg -s "$p" >/dev/null 2>&1; then apt-mark manual "$p" >/dev/null; fi
+        done
+      changed_when: false
+      tags: [gui]
+
+    - name: Purge desktop environments and display managers
+      apt:
+        name: "{{ desktop_packages }}"
+        state: absent
+        purge: true
+        autoremove: true
+      register: gui_purged
+      tags: [gui]
+
+    - name: Reboot to free the memory used by the GUI
+      reboot:
+        reboot_timeout: 300
+      when: target_changed is changed or gui_purged is changed
+      tags: [gui]

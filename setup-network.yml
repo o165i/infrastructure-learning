@@ -1,0 +1,15 @@
+- hosts: all
+  become: true
+  tasks:
+    - name: Configure enp0s3 DHCP
+      blockinfile:
+        path: /etc/network/interfaces
+        block: |
+          auto enp0s3
+          iface enp0s3 inet dhcp
+        marker: "# {mark} ANSIBLE MANAGED enp0s3"
+
+    - name: Restart networking
+      service:
+        name: networking
+        state: restarted
